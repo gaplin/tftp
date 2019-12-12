@@ -90,8 +90,8 @@ int main(int argc, char** argv) {
     std::string mode = "octet";
     char msg[100000];
     char buf[10000];
-    msg[0] = 0;
-    msg[1] = 1;
+    msg[0] = 1;
+    msg[1] = 0;
     ofstream outFile(file.c_str());
     int pos = write_to_buf(msg, 2, file);
     pos = write_to_buf(msg, pos, mode);

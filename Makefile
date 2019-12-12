@@ -1,9 +1,15 @@
 .PHONY: all
 
-all: client.out server.out
+all: server client client/client.out server/server.out
 
-client.out: client.cpp
-	g++ -Wall -g -O2 -std=c++17 client.cpp -o client.out -lboost_program_options
+server:
+	mkdir -p server
 
-server.out: server.cpp
-	g++ -Wall -g -O2 -std=c++17 server.cpp -o server.out -lboost_program_options
+client:
+	mkdir -p client
+
+client/client.out: client.cpp
+	g++ -Wall -g -O2 -std=c++17 client.cpp -o client/client.out -lboost_program_options
+
+server/server.out: server.cpp
+	g++ -Wall -g -O2 -std=c++17 server.cpp -o server/server.out -lboost_program_options
