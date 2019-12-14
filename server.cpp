@@ -26,13 +26,21 @@
 #include <unordered_map>
 #include <fstream>
 
-#define MAX_EVENTS 1000
-#define BUFFER_SIZE 10000
+#define MAX_EVENTS 1000U
+#define DEFAULT_WSIZE 1U
+#define DEFAULT_BSIZE 512U
+#define BUFFER_SIZE 10000U
+
 const unsigned short RRQ = 1;
 const unsigned short WRQ = 2;
 const unsigned short DATA = 3;
 const unsigned short ACK = 4;
 const unsigned short ERROR = 5;
+const unsigned short OACK = 6;
+const unsigned short MAX_BLOCK_SIZE = 65464;
+const unsigned short MIN_BLOCK_SIZE = 8;
+const unsigned short MAX_WINDOW_SIZE = 65535;
+const unsigned short MIN_WINDOW_SIZE = 1;
 
 using namespace std;
 
@@ -46,7 +54,10 @@ class Client {
     fstream file;
     unsigned long long position = 0;
     string fileName;
-    unsigned int blockSize = 512;
+    unsigned short blockSize = 512;
+    unsigned short windowSize = 1; 
+    unsigned short type;
+    bool end = false;
 
     friend void swap(Client& first, Client& second){
         using std::swap;
@@ -58,7 +69,10 @@ class Client {
         swap(first.fileName, second.fileName);
         swap(first.file, second.file);
         swap(first.blockSize, second.blockSize);
+        swap(first.windowSize, second.windowSize);
         swap(first.position, second.position);
+        swap(first.end, second.end);
+        swap(first.type, second.type);
     }
 
     public:
@@ -71,7 +85,8 @@ class Client {
         this->length = length;
         fileName = GetString(2);
         this->fd = fd;
-        if(GetType() == RRQ){
+        type = GetType();
+        if(type == RRQ){
             file.open(fileName, ios::in);
         } else {
             file.open(fileName, ios::app);
@@ -86,7 +101,10 @@ class Client {
         ssize = other.ssize;
         fileName = other.fileName;
         blockSize = other.blockSize;
+        windowSize = other.windowSize;
         position = other.position;
+        end = other.end;
+        type = other.type;
         if(GetType() == RRQ){
             file.open(fileName, ios::in);
         } else {
@@ -112,17 +130,42 @@ class Client {
 
     int Recv() {
         length = recvfrom(fd, buf, BUFFER_SIZE, 0, (sockaddr*)&address, &ssize);
+        Respond();
         return length;
+    }
+
+    void Respond() {
+        switch (GetType()) {
+            case RRQ:
+                if(!GetOptions()) Respond_RRQ();
+                break;
+            case ACK:
+                if(!end) {
+                    switch (type) {
+                        case RRQ:
+                            Respond_RRQ();
+                            break;
+                    }
+                }
+                break;
+        }
     }
 
     void Respond_RRQ() {
         char buf[BUFFER_SIZE];
-        memmove(buf, &DATA, 2);
-        unsigned short blockNumber = position % UINT16_MAX;
-        memmove(buf + 2, &blockNumber, 2);
-        file.read(buf + 4, blockSize);
-        int size = file.gcount();
-        Send(buf, size + 4);
+        for(int i = 0; i < windowSize; i++) {
+            memmove(buf, &DATA, 2);
+            unsigned short blockNumber = position % (UINT16_MAX + 1);
+            memmove(buf + 2, &blockNumber, 2);
+            file.read(buf + 4, blockSize);
+            int size = file.gcount();
+            position += size;
+            Send(buf, size + 4);
+            if(size < blockSize) {
+                end = true;
+                break;
+            }
+        }
     }
 
     unsigned short GetType() {
@@ -139,20 +182,62 @@ class Client {
         }
         return result;
     }
+
+    bool GetOptions() {
+        int k = 2;
+        int zeros = 0;
+        while(zeros < 2){
+            if(buf[k++] == 0) zeros++;
+        }
+        if(k == length) return false;
+
+        char ans[BUFFER_SIZE];
+        memmove(ans, &OACK, 2);
+        int pos = 2;
+        string opt;
+        while(k < length) {
+            if(buf[k] != 0) {
+                opt += tolower(buf[k++]);
+            } else {
+                unsigned short value = *((unsigned short*)(buf + k + 1));
+                if(opt == "blksize") {
+                    if(value < MIN_BLOCK_SIZE || value > MAX_BLOCK_SIZE) value = DEFAULT_BSIZE;
+                    blockSize = value;
+                    pos = write_to_buf(ans, pos, opt);
+                    memmove(ans + pos, &blockSize, 2);
+                    pos += 2;
+                } else {
+                    if(value < MIN_WINDOW_SIZE || value > MAX_WINDOW_SIZE) value = DEFAULT_WSIZE;
+                    windowSize = DEFAULT_WSIZE;
+                    pos = write_to_buf(ans, pos, opt);
+                    memmove(ans + pos, &windowSize, 2);
+                    pos += 2;
+                }
+                opt.clear();
+                k += 3;
+            }
+        }
+        Send(ans, pos);
+        return true;
+    }
+
+    int write_to_buf(char *buf, int start, string msg) {
+	    for(int i = 0; i <(int) msg.size(); i++) {
+		    buf[i + start] = msg[i];
+        }
+	    buf[start + msg.size()] = 0;
+	    return start + msg.size() + 1;
+    }
+
+    operator bool() const {
+        return !end;
+    }
 };
 
 unordered_map<int, Client> connection;
 struct epoll_event ev, events[MAX_EVENTS];
 struct sockaddr_in connected;
 socklen_t ssize = sizeof(connected);
-
-int write_to_buf(char *buf, int start, string msg){
-	for(int i = 0; i <(int) msg.size(); i++){
-		buf[i + start] = msg[i];
-	}
-	buf[start + msg.size()] = 0;
-	return start + msg.size() + 1;
-}
 
 int main(int argc, char** argv) {
     std::ios_base::sync_with_stdio(0);
@@ -219,10 +304,14 @@ int main(int argc, char** argv) {
                 connection[conn_sock] = Client(conn_sock, connected, buf, data);
 
                 
-                connection[conn_sock].Respond_RRQ();
+                connection[conn_sock].Respond();
             } else {
                 int fd = events[n].data.fd;
-                connection[fd].Respond_RRQ();
+                connection[fd].Recv();
+                if(!connection[fd]){
+                    close(fd);
+                    connection.erase(fd);
+                }
             }
         }
     }
