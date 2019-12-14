@@ -10,6 +10,7 @@
 #include <netdb.h>
 #include <poll.h>
 #include <boost/program_options.hpp>
+#include <boost/lexical_cast.hpp>
 
 #include <gsl/gsl_errno.h>
 #include <gsl/gsl_fft_complex.h>
@@ -62,10 +63,13 @@ void getOptions(unsigned short& blocksize, unsigned short& windowsize, char buf[
         if(buf[k] != 0) {
             opt += tolower(buf[k++]);
         } else {
-            if(opt == "blksize") blocksize = *((unsigned short*)(buf + k + 1));
-            else windowsize = *((unsigned short*)(buf + k + 1));
+            string svalue;
+            while(buf[++k] != 0) svalue += buf[k];
+            unsigned short value = boost::lexical_cast<unsigned short>(svalue);
+            if(opt == "blksize") blocksize = value;
+            else windowsize = value;
             opt.clear();
-            k += 3;
+            k++;
         }
     }
 }
@@ -188,13 +192,11 @@ int main(int argc, char** argv) {
     pos = write_to_buf(msg, pos, mode);
     if(requested_blocksize != DEFAULT_BSIZE) {
         pos = write_to_buf(msg, pos, "blksize");
-        memmove(msg + pos, &requested_blocksize, 2);
-        pos += 2;
+        pos = write_to_buf(msg, pos, boost::lexical_cast<string>(requested_blocksize));
     }
     if(requested_windowsize != DEFAULT_WSIZE) {
         pos = write_to_buf(msg, pos, "windowsize");
-        memmove(msg + pos, &requested_windowsize, 2);
-        pos += 2;
+        pos = write_to_buf(msg, pos, boost::lexical_cast<string>(requested_windowsize));
     }
 
     sendto(sock_fd, msg, pos, 0, (sockaddr*)&name, ssize);
@@ -217,7 +219,7 @@ int main(int argc, char** argv) {
             continue;
         }
         timeouts = 0;
-        if(rand() % 25 == 0) {
+        if(rand() % 100 < 0) {
             cerr << "PACKET LOST " << *((unsigned short*)(buf + 2)) << "\n";
             continue;
         }
@@ -234,6 +236,7 @@ int main(int argc, char** argv) {
             getOptions(blocksize, windowsize, buf, k);
             memmove(msg, &ACK, 2);
             msg[2] = msg[3] = 0;
+            cerr << blocksize << " " << windowsize << "\n";
             sendto(sock_fd, msg, 4, 0, (sockaddr*)&name, ssize);
             continue;
         }

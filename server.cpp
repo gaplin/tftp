@@ -26,12 +26,13 @@
 #include <unordered_map>
 #include <fstream>
 #include <chrono>
+#include <boost/lexical_cast.hpp>
 
 #define MAX_EVENTS 1000U
 #define MAX_TIMEOUTS 3U
 #define DEFAULT_WSIZE 1U
 #define DEFAULT_BSIZE 512U
-#define DEFAULT_TIMEOUT 100
+#define DEFAULT_TIMEOUT 200
 #define BUFFER_SIZE 10000U
 
 const unsigned short RRQ = 1;
@@ -245,24 +246,25 @@ class Client {
             if(buf[k] != 0) {
                 opt += tolower(buf[k++]);
             } else {
-                unsigned short value = *((unsigned short*)(buf + k + 1));
+                string svalue;
+                while(buf[++k] != 0) svalue += buf[k];
+                unsigned short value = boost::lexical_cast<unsigned short>(svalue);
                 if(opt == "blksize") {
                     if(value < MIN_BLOCK_SIZE || value > MAX_BLOCK_SIZE) value = DEFAULT_BSIZE;
                     blockSize = value;
                     pos = write_to_buf(ans, pos, opt);
-                    memmove(ans + pos, &blockSize, 2);
-                    pos += 2;
+                    pos = write_to_buf(ans, pos, boost::lexical_cast<string>(value));
                 } else if(opt == "windowsize") {
                     if(value < MIN_WINDOW_SIZE || value > MAX_WINDOW_SIZE) value = DEFAULT_WSIZE;
                     windowSize = value;
                     pos = write_to_buf(ans, pos, opt);
-                    memmove(ans + pos, &windowSize, 2);
-                    pos += 2;
+                    pos = write_to_buf(ans, pos, boost::lexical_cast<string>(value));
                 }
                 opt.clear();
-                k += 3;
+                k++;
             }
         }
+        cerr << windowSize << " " << blockSize << "\n";
         Send(ans, pos);
         return true;
     }
