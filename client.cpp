@@ -29,6 +29,7 @@ namespace po = boost::program_options;
 #define BUFFER_SIZE 10000U
 #define DEFAULT_WSIZE 1U
 #define DEFAULT_BSIZE 512U
+#define MAX_TIMEOUTS 3
 
 const unsigned short RRQ = 1;
 const unsigned short WRQ = 2;
@@ -80,7 +81,8 @@ int main(int argc, char** argv) {
     ("write,w", po::value<string>(), "Write")
     ("read,r", po::value<string>(), "Read")
     ("blocksize", po::value<unsigned short>(), "Blocksize")
-    ("windowsize", po::value<unsigned short>(), "Windowsize");
+    ("windowsize", po::value<unsigned short>(), "Windowsize")
+    ("output,o", po::value<string>(), "Output fileName");
 
     po::variables_map vm;
     po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -94,6 +96,7 @@ int main(int argc, char** argv) {
     string port = "69";
     string ip = "azure.prajer.ninja";
     string file = "pxelinux.2";
+    string outFileName;
     unsigned short windowsize = DEFAULT_WSIZE;
     unsigned short blocksize = DEFAULT_BSIZE;
     unsigned short request = RRQ;
@@ -107,6 +110,7 @@ int main(int argc, char** argv) {
     if(vm.count("read")) {
         request = RRQ;
         file = vm["read"].as<string>();
+        outFileName = file;
     }
     else if(vm.count("write")) {
         request = WRQ;
@@ -115,6 +119,9 @@ int main(int argc, char** argv) {
     else {
         cout << desc << "\n";
         return 1;
+    }
+    if(vm.count("output")) {
+        outFileName = vm["output"].as<string>();
     }
     if(vm.count("blocksize")) {
         requested_blocksize = vm["blocksize"].as<unsigned short>();
@@ -166,7 +173,7 @@ int main(int argc, char** argv) {
     sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
     struct timeval timeout;
     timeout.tv_sec = 0;
-    timeout.tv_sec = 20000;
+    timeout.tv_usec = 200000;
     setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
 
 
@@ -176,7 +183,7 @@ int main(int argc, char** argv) {
     char msg[BUFFER_SIZE];
     char buf[BUFFER_SIZE];
     memmove(msg, &request, 2);
-    ofstream outFile(file.c_str());
+    ofstream outFile(outFileName.c_str());
     int pos = write_to_buf(msg, 2, file);
     pos = write_to_buf(msg, pos, mode);
     if(requested_blocksize != DEFAULT_BSIZE) {
@@ -194,8 +201,26 @@ int main(int argc, char** argv) {
     name.sin_port = 0;
     std::cerr << "msg sent\n";
     int block = 0;
+    unsigned short last_block = 0;
+    unsigned long long counter = 0;
+    unsigned short timeouts = 0;
     while(true){
+        counter++;
 	    int k = recvfrom(sock_fd, buf, BUFFER_SIZE, 0, (sockaddr*)&name, &ssize);
+        if(k <= 0) {
+            if(timeouts == MAX_TIMEOUTS) {
+                cerr << "connection lost\n";
+                close(sock_fd);
+                exit(EXIT_FAILURE);
+            }
+            timeouts++;
+            continue;
+        }
+        timeouts = 0;
+        if(rand() % 25 == 0) {
+            cerr << "PACKET LOST " << *((unsigned short*)(buf + 2)) << "\n";
+            continue;
+        }
 	    if(*((unsigned short*)buf) == ERROR) {
 		    cerr << "error ";
 		    unlink(file.c_str());
@@ -205,6 +230,7 @@ int main(int argc, char** argv) {
 		    break;
 	    }
         else if(*((unsigned short*)buf) == OACK) {
+            block = 0;
             getOptions(blocksize, windowsize, buf, k);
             memmove(msg, &ACK, 2);
             msg[2] = msg[3] = 0;
@@ -212,12 +238,25 @@ int main(int argc, char** argv) {
             continue;
         }
         block++;
+        unsigned short blocknum = *((unsigned short*)(buf + 2));
+        if(blocknum != last_block + 1) {
+            if(block == windowsize || k < 4 + blocksize) {
+                memmove(msg, &ACK, 2);
+                memmove(msg + 2, &last_block, 2);
+                cerr << "!ACK " << last_block << "\n";
+                sendto(sock_fd, msg, 4, 0, (sockaddr*)&name, ssize);
+                block = 0;
+            }
+            continue;
+        }
 	    for(int i = 4; i < k; i++){
 		    outFile << buf[i];
 	    }
+        last_block = blocknum;
         if(block == windowsize || k < 4 + blocksize) {
             memmove(msg, &ACK, 2);
-            memmove(msg + 2, buf + 2, 2);
+            memmove(msg + 2, &blocknum, 2);
+            cerr << "ACK " << blocknum << "\n";
 	        sendto(sock_fd, msg, 4, 0, (sockaddr*)&name, ssize);
             block = 0;
         }
@@ -227,5 +266,5 @@ int main(int argc, char** argv) {
 
     close(sock_fd);
 
-    return 0;
+    return EXIT_SUCCESS;
 }
