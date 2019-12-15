@@ -23,7 +23,7 @@
 #include <fstream>
 #include <string.h>
 #include <cstdlib>
-#include <unordered_map>
+#include <map>
 #include <fstream>
 #include <chrono>
 #include <boost/lexical_cast.hpp>
@@ -50,6 +50,7 @@ using namespace std;
 
 using Clock = std::chrono::high_resolution_clock;
 using Ms = std::chrono::milliseconds;
+typedef pair<unsigned long, unsigned short> P;
 
 class Client {
     private:
@@ -146,20 +147,26 @@ class Client {
     }
 
     int Recv() {
-        length = recvfrom(fd, buf, BUFFER_SIZE, 0, (sockaddr*)&address, &ssize);
-        timeouts = 0;
-        Respond();
+        length = recvfrom(fd, buf, BUFFER_SIZE, MSG_DONTWAIT, (sockaddr*)&address, &ssize);
+        if(length > 0) timeouts = 0;
         return length;
     }
 
-    void Respond() {
+    int Recv(char buf[], int length) {
+        this->length = length;
+        memmove(this->buf, buf, length);
+        if(length > 0) timeouts = 0;
+        return length;
+    }
+
+    bool Respond() {
         switch (GetType()) {
             case RRQ:
                 if(!GetOptions()) Respond_RRQ();
                 break;
             case ACK: {
                 unsigned short blocknum = *((unsigned short*)(buf + 2));
-                if(!is_good_ack(blocknum)) break;
+                if(!is_good_ack(blocknum)) return false;
                 correct_position(blocknum);
                 last_ACK = blocknum;
                 if((*this)) {
@@ -172,9 +179,10 @@ class Client {
                 break;
             }
             case ERROR:
-                end = true;
-                break;
+                timeouts = MAX_TIMEOUTS;
+                return false;
         }
+        return true;
     }
 
     void Respond_RRQ() {
@@ -193,6 +201,9 @@ class Client {
                 last_block = blockNumber;
                 end = true;
                 break;
+            }
+            if(i < windowSize - 1 && Recv() > 0) {
+                if(Respond()) return;
             }
         }
     }
@@ -216,6 +227,10 @@ class Client {
 
     unsigned short GetType() {
         return *((unsigned short*)buf);
+    }
+
+    int GetFd() {
+        return fd;
     }
 
     auto GetEndTime() {
@@ -264,7 +279,6 @@ class Client {
                 k++;
             }
         }
-        cerr << windowSize << " " << blockSize << "\n";
         Send(ans, pos);
         return true;
     }
@@ -279,7 +293,7 @@ class Client {
 
     bool is_good_ack(unsigned short ack) {
         if(position == 0 && ack == 0) return true;
-        unsigned short last_sent = (position / blockSize + 1);
+        unsigned short last_sent = (position / blockSize);
         if(last_sent < last_ACK) {
             return ack > last_ACK || ack <= last_sent;
         }
@@ -287,13 +301,13 @@ class Client {
     }
 
     void correct_position(unsigned short block) {
-        unsigned short last_block = position / blockSize;
-        if(block == last_block) return;
+        unsigned short last_blockNum = position / blockSize;
+        if(block == last_blockNum) return;
         unsigned long long diff = 0;
-        if(last_block > block) {
-            diff = last_block - block;
+        if(last_blockNum > block) {
+            diff = last_blockNum - block;
         } else {
-            diff = last_block + 1 + (UINT16_MAX - block);
+            diff = last_blockNum + 1 + (UINT16_MAX - block);
         }
         position -= diff * blockSize;
         file.clear();
@@ -305,7 +319,7 @@ class Client {
     }
 };
 
-unordered_map<int, Client> connection;
+map<P, Client> connection;
 struct epoll_event ev, events[MAX_EVENTS];
 struct sockaddr_in connected;
 socklen_t ssize = sizeof(connected);
@@ -366,7 +380,7 @@ int main(int argc, char** argv) {
                 if(diff <= 0) {
                     if(!(it->second)) {
                         cerr << "connection closed\n";
-                        close(it->first);
+                        close(it->second.GetFd());
                         it = connection.erase(it);
                         continue;
                     }
@@ -398,16 +412,20 @@ int main(int argc, char** argv) {
                     close(conn_sock);
                 }
 
-                connection[conn_sock] = Client(conn_sock, connected, buf, data);
-                connection[conn_sock].Respond();
+                P newClient(connected.sin_addr.s_addr, connected.sin_port);
+                connection[newClient] = Client(conn_sock, connected, buf, data);
+                connection[newClient].Respond();
 
             } else {
                 int fd = events[n].data.fd;
-                connection[fd].Recv();
-                if(!connection[fd]){
+                int length = recvfrom(fd, buf, BUFFER_SIZE, MSG_DONTWAIT, (sockaddr*)&connected, &ssize);
+                P cl(connected.sin_addr.s_addr, connected.sin_port);
+                connection[cl].Recv(buf, length);
+                connection[cl].Respond();
+                if(!connection[cl]){
                     cerr << "connection closed\n";
                     close(fd);
-                    connection.erase(fd);
+                    connection.erase(cl);
                 }
             }
         }

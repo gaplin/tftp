@@ -201,11 +201,12 @@ int main(int argc, char** argv) {
 
     sendto(sock_fd, msg, pos, 0, (sockaddr*)&name, ssize);
     name.sin_port = 0;
-    std::cerr << "msg sent\n";
+    cout << "msg sent\n";
     int block = 0;
     unsigned short last_block = 0;
     unsigned long long counter = 0;
     unsigned short timeouts = 0;
+    unsigned short last_ACK = 0;
     while(true){
         counter++;
 	    int k = recvfrom(sock_fd, buf, BUFFER_SIZE, 0, (sockaddr*)&name, &ssize);
@@ -236,19 +237,19 @@ int main(int argc, char** argv) {
             getOptions(blocksize, windowsize, buf, k);
             memmove(msg, &ACK, 2);
             msg[2] = msg[3] = 0;
-            cerr << blocksize << " " << windowsize << "\n";
             sendto(sock_fd, msg, 4, 0, (sockaddr*)&name, ssize);
             continue;
         }
         block++;
         unsigned short blocknum = *((unsigned short*)(buf + 2));
-        if(blocknum != last_block + 1) {
-            if(block == windowsize || k < 4 + blocksize) {
+        if(blocknum != (unsigned short)(last_block + 1)) {
+            if(last_ACK != last_block) {
                 memmove(msg, &ACK, 2);
                 memmove(msg + 2, &last_block, 2);
-                cerr << "!ACK " << last_block << "\n";
+                cout << "!ACK " << last_block << "\n";
                 sendto(sock_fd, msg, 4, 0, (sockaddr*)&name, ssize);
                 block = 0;
+                last_ACK = last_block;
             }
             continue;
         }
@@ -259,9 +260,10 @@ int main(int argc, char** argv) {
         if(block == windowsize || k < 4 + blocksize) {
             memmove(msg, &ACK, 2);
             memmove(msg + 2, &blocknum, 2);
-            cerr << "ACK " << blocknum << "\n";
+            cout << "ACK " << blocknum << "\n";
 	        sendto(sock_fd, msg, 4, 0, (sockaddr*)&name, ssize);
             block = 0;
+            last_ACK = blocknum;
         }
 	    if(k < 4 + blocksize)
 		    break;
