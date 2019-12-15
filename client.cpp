@@ -67,7 +67,7 @@ void getOptions(unsigned short& blocksize, unsigned short& windowsize, char buf[
             while(buf[++k] != 0) svalue += buf[k];
             unsigned short value = boost::lexical_cast<unsigned short>(svalue);
             if(opt == "blksize") blocksize = value;
-            else windowsize = value;
+            else if(opt == "windowsize") windowsize = value;
             opt.clear();
             k++;
         }

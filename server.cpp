@@ -27,6 +27,7 @@
 #include <fstream>
 #include <chrono>
 #include <boost/lexical_cast.hpp>
+#include <boost/program_options.hpp>
 
 #define MAX_EVENTS 1000U
 #define MAX_TIMEOUTS 3U
@@ -47,10 +48,13 @@ const unsigned short MAX_WINDOW_SIZE = 65535;
 const unsigned short MIN_WINDOW_SIZE = 1;
 
 using namespace std;
+namespace po = boost::program_options;
 
 using Clock = std::chrono::high_resolution_clock;
 using Ms = std::chrono::milliseconds;
 typedef pair<unsigned long, unsigned short> P;
+bool onePort = false;
+
 
 class Client {
     private:
@@ -162,7 +166,11 @@ class Client {
     bool Respond() {
         switch (GetType()) {
             case RRQ:
-                if(!GetOptions()) Respond_RRQ();
+                if(!file.good()) {
+                    SendError(1, "File not found.");
+                    break;
+                }
+                if(!GetOptions() && (*this)) Respond_RRQ();
                 break;
             case ACK: {
                 unsigned short blocknum = *((unsigned short*)(buf + 2));
@@ -202,8 +210,8 @@ class Client {
                 end = true;
                 break;
             }
-            if(i < windowSize - 1 && Recv() > 0) {
-                if(Respond()) return;
+            if(!onePort && i < windowSize - 1 && Recv() > 0) {
+                if(Respond() || !(*this)) return;
             }
         }
     }
@@ -245,6 +253,15 @@ class Client {
         return result;
     }
 
+    int SendError(unsigned short errcode, string errmsg) {
+        char buf[BUFFER_SIZE];
+        memmove(buf, &ERROR, 2);
+        memmove(buf + 2, &errcode, 2);
+        int pos = write_to_buf(buf, 4, errmsg);
+        timeouts = MAX_TIMEOUTS;
+        return Send(buf, pos);
+    }
+
     bool GetOptions() {
         int k = 2;
         int zeros = 0;
@@ -265,12 +282,20 @@ class Client {
                 while(buf[++k] != 0) svalue += buf[k];
                 unsigned short value = boost::lexical_cast<unsigned short>(svalue);
                 if(opt == "blksize") {
-                    if(value < MIN_BLOCK_SIZE || value > MAX_BLOCK_SIZE) value = DEFAULT_BSIZE;
+                    if(value < MIN_BLOCK_SIZE) {
+                        SendError(0, "wrong blocksize");
+                        return false;
+                    }
+                    if(value > MAX_BLOCK_SIZE) value = DEFAULT_BSIZE;
                     blockSize = value;
                     pos = write_to_buf(ans, pos, opt);
                     pos = write_to_buf(ans, pos, boost::lexical_cast<string>(value));
                 } else if(opt == "windowsize") {
-                    if(value < MIN_WINDOW_SIZE || value > MAX_WINDOW_SIZE) value = DEFAULT_WSIZE;
+                    if(value < MIN_WINDOW_SIZE) {
+                        SendError(0, "wrong windowsize");
+                        return false;
+                    }
+                    if(value > MAX_WINDOW_SIZE) value = DEFAULT_WSIZE;
                     windowSize = value;
                     pos = write_to_buf(ans, pos, opt);
                     pos = write_to_buf(ans, pos, boost::lexical_cast<string>(value));
@@ -328,10 +353,26 @@ int main(int argc, char** argv) {
     std::ios_base::sync_with_stdio(0);
     srand(time(0));
 
+    po::options_description desc("Options");
+    desc.add_options()
+    ("help", "Print help message")
+    ("oneport,p", "All queries on port 69");
+
+    po::variables_map vm;
+    po::store(po::parse_command_line(argc, argv, desc), vm);
+    po::notify(vm);
+
+
+    if(vm.count("help")) {
+        cout << desc << "\n";
+        return 1;
+    }
+    if(vm.count("oneport")) {
+        onePort = true;
+    }
+
     struct sockaddr_in name;
     int listen_sock = socket(AF_INET, SOCK_DGRAM, 0);
-
-
 
     memset(&name, 0, sizeof(name));
     name.sin_family = AF_INET;
@@ -380,7 +421,7 @@ int main(int argc, char** argv) {
                 if(diff <= 0) {
                     if(!(it->second)) {
                         cerr << "connection closed\n";
-                        close(it->second.GetFd());
+                        if(!onePort) close(it->second.GetFd());
                         it = connection.erase(it);
                         continue;
                     }
@@ -393,29 +434,35 @@ int main(int argc, char** argv) {
         for(int n = 0; n < nfds; n++) {
             if(events[n].data.fd == listen_sock) {
                 int data = recvfrom(listen_sock, buf, BUFFER_SIZE, 0, (sockaddr*)&connected, &ssize);
-                conn_sock = socket(AF_INET, SOCK_DGRAM, 0);
-                struct sockaddr_in newSock;
-                memset(&newSock, 0, sizeof(newSock));
-                newSock.sin_addr.s_addr = 0;
-                newSock.sin_port = 0;
-                newSock.sin_family = AF_INET;
-                if(bind(conn_sock, (sockaddr*)&newSock, sizeof(newSock)) < 0) {
-                    perror("bind: conn_sock");
-                    close(conn_sock);
-                    continue;
+                P cl(connected.sin_addr.s_addr, connected.sin_port);
+                if(!onePort) {
+                    conn_sock = socket(AF_INET, SOCK_DGRAM, 0);
+                    struct sockaddr_in newSock;
+                    memset(&newSock, 0, sizeof(newSock));
+                    newSock.sin_addr.s_addr = 0;
+                    newSock.sin_port = 0;
+                    newSock.sin_family = AF_INET;
+                    if(bind(conn_sock, (sockaddr*)&newSock, sizeof(newSock)) < 0) {
+                        perror("bind: conn_sock");
+                        close(conn_sock);
+                        continue;
+                    }
+
+                    ev.events = EPOLLIN | EPOLLET;
+                    ev.data.fd = conn_sock;
+                    if(epoll_ctl(epollfd, EPOLL_CTL_ADD, conn_sock, &ev) < 0){
+                        perror("epoll_ctl: conn_sock");
+                        close(conn_sock);
+                    }
+                    connection[cl] = Client(conn_sock, connected, buf, data);
+                } else {
+                    if(connection.count(cl) == 0) {
+                        connection[cl] = Client(listen_sock, connected, buf, data);
+                    } else {
+                        connection[cl].Recv(buf, data);
+                    }
                 }
-
-                ev.events = EPOLLIN | EPOLLET;
-                ev.data.fd = conn_sock;
-                if(epoll_ctl(epollfd, EPOLL_CTL_ADD, conn_sock, &ev) < 0){
-                    perror("epoll_ctl: conn_sock");
-                    close(conn_sock);
-                }
-
-                P newClient(connected.sin_addr.s_addr, connected.sin_port);
-                connection[newClient] = Client(conn_sock, connected, buf, data);
-                connection[newClient].Respond();
-
+                connection[cl].Respond();
             } else {
                 int fd = events[n].data.fd;
                 int length = recvfrom(fd, buf, BUFFER_SIZE, MSG_DONTWAIT, (sockaddr*)&connected, &ssize);
@@ -424,7 +471,7 @@ int main(int argc, char** argv) {
                 connection[cl].Respond();
                 if(!connection[cl]){
                     cerr << "connection closed\n";
-                    close(fd);
+                    if(!onePort) close(fd);
                     connection.erase(cl);
                 }
             }
