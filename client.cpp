@@ -45,6 +45,7 @@ const unsigned short MIN_WINDOW_SIZE = 1;
 
 struct addrinfo hints;
 struct addrinfo *result, *rp;
+struct sockaddr_in name;
 
 socklen_t ssize = sizeof(sockaddr_in);
 
@@ -72,6 +73,14 @@ void getOptions(unsigned short& blocksize, unsigned short& windowsize, char buf[
             k++;
         }
     }
+}
+
+void sendACK(int fd, const int& blocknum) {
+    cout << "ACK " << blocknum << "\n";
+    char buf[4];
+    memmove(buf, &ACK, 2);
+    memmove(buf + 2, &blocknum, 2);
+    sendto(fd, buf, 4, 0, (sockaddr*)&name, ssize);
 }
 
 int main(int argc, char** argv) {
@@ -164,7 +173,6 @@ int main(int argc, char** argv) {
                 exit(1);
         }
 
-    struct sockaddr_in name;
     memset(&name, 0, sizeof(name));
     if(rp->ai_addr->sa_family == AF_INET){
         memmove(&name, rp->ai_addr, sizeof(struct sockaddr_in));
@@ -176,8 +184,8 @@ int main(int argc, char** argv) {
     name.sin_port = htons(69);
     sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
     struct timeval timeout;
-    timeout.tv_sec = 0;
-    timeout.tv_usec = 200000;
+    timeout.tv_sec = 1;
+    timeout.tv_usec = 0;
     setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
 
 
@@ -211,6 +219,7 @@ int main(int argc, char** argv) {
         counter++;
 	    int k = recvfrom(sock_fd, buf, BUFFER_SIZE, 0, (sockaddr*)&name, &ssize);
         if(k <= 0) {
+            sendACK(sock_fd, last_block);
             if(timeouts == MAX_TIMEOUTS) {
                 cerr << "connection lost\n";
                 close(sock_fd);
@@ -220,10 +229,6 @@ int main(int argc, char** argv) {
             continue;
         }
         timeouts = 0;
-        if(rand() % 100 < 0) {
-            cerr << "PACKET LOST " << *((unsigned short*)(buf + 2)) << "\n";
-            continue;
-        }
 	    if(*((unsigned short*)buf) == ERROR) {
 		    cerr << "error ";
 		    unlink(file.c_str());
@@ -235,19 +240,14 @@ int main(int argc, char** argv) {
         else if(*((unsigned short*)buf) == OACK) {
             block = 0;
             getOptions(blocksize, windowsize, buf, k);
-            memmove(msg, &ACK, 2);
-            msg[2] = msg[3] = 0;
-            sendto(sock_fd, msg, 4, 0, (sockaddr*)&name, ssize);
+            sendACK(sock_fd, 0);
             continue;
         }
         block++;
         unsigned short blocknum = *((unsigned short*)(buf + 2));
         if(blocknum != (unsigned short)(last_block + 1)) {
             if(last_ACK != last_block) {
-                memmove(msg, &ACK, 2);
-                memmove(msg + 2, &last_block, 2);
-                cout << "!ACK " << last_block << "\n";
-                sendto(sock_fd, msg, 4, 0, (sockaddr*)&name, ssize);
+                sendACK(sock_fd, last_block);
                 block = 0;
                 last_ACK = last_block;
             }
@@ -258,10 +258,7 @@ int main(int argc, char** argv) {
 	    }
         last_block = blocknum;
         if(block == windowsize || k < 4 + blocksize) {
-            memmove(msg, &ACK, 2);
-            memmove(msg + 2, &blocknum, 2);
-            cout << "ACK " << blocknum << "\n";
-	        sendto(sock_fd, msg, 4, 0, (sockaddr*)&name, ssize);
+            sendACK(sock_fd, blocknum);
             block = 0;
             last_ACK = blocknum;
         }

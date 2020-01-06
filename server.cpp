@@ -29,12 +29,14 @@
 #include <boost/lexical_cast.hpp>
 #include <boost/program_options.hpp>
 
+#define MIN_TIMEOUT 1000
 #define MAX_EVENTS 1000U
 #define MAX_TIMEOUTS 3U
 #define DEFAULT_WSIZE 1U
 #define DEFAULT_BSIZE 512U
-#define DEFAULT_TIMEOUT 200
+#define DEFAULT_TIMEOUT 2000
 #define BUFFER_SIZE 10000U
+#define G 100
 
 const unsigned short RRQ = 1;
 const unsigned short WRQ = 2;
@@ -69,6 +71,8 @@ class Client {
     fstream file;
     bool end = false;
     Clock::time_point t_end = Clock::now() + Ms(DEFAULT_TIMEOUT);
+    Clock::time_point start = Clock::now();
+    double RTTm = -1, RTTs = -1, RTTd = -1, t = 0.125, k = 0.25;
 
     friend void swap(Client& first, Client& second){
         using std::swap;
@@ -89,6 +93,26 @@ class Client {
         swap(first.file, second.file);
         swap(first.end, second.end);
         swap(first.t_end, second.t_end);
+        swap(first.start, second.start);
+        swap(first.RTTm, second.RTTm);
+        swap(first.RTTs, second.RTTs);
+        swap(first.RTTd, second.RTTd);
+        swap(first.t, second.t);
+        swap(first.k, second.k);
+    }
+
+    void calc_timeout() {
+        RTTm = chrono::duration<double, milli>(Clock::now() - start).count();
+        RTTs = (RTTs == -1) ? RTTm : (1 - t) * RTTs + t * RTTm;
+        RTTd = (RTTd == -1) ? RTTm / 2 : (1 - k) * RTTd + k * abs(RTTm - RTTs);
+    }
+
+    void update_timeout() {
+        int timeout = (RTTm == -1) ? DEFAULT_TIMEOUT : (int)ceil(RTTs) + max(G, (int)ceil(4 * RTTd));
+        if(timeout < MIN_TIMEOUT) timeout = MIN_TIMEOUT;
+        cout << RTTm << " " << RTTs << " " << RTTd << "\n";
+        cerr << "TIMEOUT = " << timeout << "\n";
+        t_end = Clock::now() + Ms(timeout);
     }
 
     public:
@@ -126,6 +150,12 @@ class Client {
         fileName = other.fileName;
         end = other.end;
         t_end = other.t_end;
+        start = other.start;
+        RTTm = other.RTTm;
+        RTTs = other.RTTs;
+        RTTd = other.RTTd;
+        t = other.t;
+        k = other.k;
         if(type == RRQ){
             file.open(fileName, ios::in | ios::binary);
         } else {
@@ -146,20 +176,18 @@ class Client {
     }
 
     int Send(char buf[], int bytes) {
-        t_end = Clock::now() + Ms(DEFAULT_TIMEOUT);
+        update_timeout();
+        start = Clock::now();
         return sendto(fd, buf, bytes, 0, (sockaddr*)&address, ssize);
-    }
-
-    int Recv() {
-        length = recvfrom(fd, buf, BUFFER_SIZE, MSG_DONTWAIT, (sockaddr*)&address, &ssize);
-        if(length > 0) timeouts = 0;
-        return length;
     }
 
     int Recv(char buf[], int length) {
         this->length = length;
         memmove(this->buf, buf, length);
-        if(length > 0) timeouts = 0;
+        if(length > 0) {
+            calc_timeout();
+            timeouts = 0;
+        }
         return length;
     }
 
@@ -171,6 +199,9 @@ class Client {
                     break;
                 }
                 if(!GetOptions() && (*this)) Respond_RRQ();
+                break;
+            case WRQ:
+                if(!GetOptions() && (*this)) Respond_WRQ();
                 break;
             case ACK: {
                 unsigned short blocknum = *((unsigned short*)(buf + 2));
@@ -184,6 +215,10 @@ class Client {
                             break;
                     }
                 }
+                break;
+            }
+            case DATA: {
+                Respond_WRQ();
                 break;
             }
             case ERROR:
@@ -210,17 +245,18 @@ class Client {
                 end = true;
                 break;
             }
-            if(!onePort && i < windowSize - 1 && Recv() > 0) {
-                if(Respond() || !(*this)) return;
-            }
         }
+    }
+
+    void Respond_WRQ() {
+
     }
 
     void Retransmit() {
         end = false;
         timeouts++;
         if(position == 0) {
-            t_end = Clock::now() + Ms(DEFAULT_TIMEOUT);
+            update_timeout();
             return;
         }
         switch (type) {
