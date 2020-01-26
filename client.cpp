@@ -49,6 +49,15 @@ struct sockaddr_in name;
 
 socklen_t ssize = sizeof(sockaddr_in);
 
+fstream file;
+
+int block = 0, k, sock_fd, s;
+unsigned short windowsize = DEFAULT_WSIZE, blocksize = DEFAULT_BSIZE;
+unsigned short last_block = 0, timeouts = 0, last_ACK = 0;
+unsigned long long position = 0, last_position = 0;
+char buf[BUFFER_SIZE];
+bool endd = false;
+
 int write_to_buf(char *buf, int start, string msg){
 	for(int i = 0; i <(int) msg.size(); i++){
 		buf[i + start] = msg[i];
@@ -56,6 +65,32 @@ int write_to_buf(char *buf, int start, string msg){
 	buf[start + msg.size()] = 0;
 	return start + msg.size() + 1;
 }
+
+bool is_good_ack(unsigned short ack) {
+    if(position == 0 && ack == 0) return true;
+    unsigned short last_sent = (position / blocksize);
+    if(last_sent < last_ACK) {
+        return ack > last_ACK || ack <= last_sent;
+    }
+    return ack > last_ACK && ack <= last_sent;
+}
+
+void correct_position(unsigned short block) {
+    unsigned short last_blockNum = position / blocksize;
+    if(block == last_blockNum) {
+        return;
+    }
+    unsigned long long diff = 0;
+    if(last_blockNum > block) {
+        diff = last_blockNum - block;
+    } else {
+        diff = last_blockNum + 1 + (UINT16_MAX - block);
+    }
+    position -= diff * blocksize;
+    file.clear();
+    file.seekg(position, ios_base::beg);
+}
+
 
 void getOptions(unsigned short& blocksize, unsigned short& windowsize, char buf[], int size) {
     string opt;
@@ -75,12 +110,55 @@ void getOptions(unsigned short& blocksize, unsigned short& windowsize, char buf[
     }
 }
 
-void sendACK(int fd, const int& blocknum) {
-    cout << "ACK " << blocknum << "\n";
+void sendACK(const int& blocknum) {
+    cerr << "SENDING ACK " << blocknum << "\n";
     char buf[4];
     memmove(buf, &ACK, 2);
     memmove(buf + 2, &blocknum, 2);
-    sendto(fd, buf, 4, 0, (sockaddr*)&name, ssize);
+    sendto(sock_fd, buf, 4, 0, (sockaddr*)&name, ssize);
+}
+
+void read_data() {
+    block++;
+    unsigned short blocknum = *((unsigned short*)(buf + 2));
+    if(blocknum != (unsigned short)(last_block + 1)) {
+        if(last_ACK != last_block) {
+            sendACK(last_block);
+            block = 0;
+            last_ACK = last_block;
+        }
+        return;
+    }
+    for(int i = 4; i < k; i++){
+        file << buf[i];
+    }
+    last_block = blocknum;
+    if(block == windowsize || k < 4 + blocksize) {
+        sendACK(blocknum);
+        block = 0;
+        last_ACK = blocknum;
+    }
+    if(k < 4 + blocksize) exit(EXIT_SUCCESS);
+}
+
+void sendData() {
+    last_position = position;
+    char buf[BUFFER_SIZE];
+    for(int i = 0; i < windowsize; i++) {
+        memmove(buf, &DATA, 2);
+        unsigned short blockNumber = position / blocksize + 1;
+        cerr << "SENDING DATA " << blockNumber << "\n";
+        memmove(buf + 2, &blockNumber, 2);
+        file.read(buf + 4, blocksize);
+        int size = file.gcount();
+        position += blocksize;
+        sendto(sock_fd, buf, size + 4, 0, (sockaddr*)&name, ssize);
+        if(size < blocksize) {
+            last_block = blockNumber;
+            endd = true;
+            break;
+        }
+    }
 }
 
 int main(int argc, char** argv) {
@@ -108,10 +186,7 @@ int main(int argc, char** argv) {
 
     string port = "69";
     string ip = "azure.prajer.ninja";
-    string file = "pxelinux.2";
-    string outFileName;
-    unsigned short windowsize = DEFAULT_WSIZE;
-    unsigned short blocksize = DEFAULT_BSIZE;
+    string fileName, outFileName;
     unsigned short request = RRQ;
     unsigned short requested_windowsize = DEFAULT_WSIZE;
     unsigned short requested_blocksize = DEFAULT_BSIZE;
@@ -122,12 +197,12 @@ int main(int argc, char** argv) {
     }
     if(vm.count("read")) {
         request = RRQ;
-        file = vm["read"].as<string>();
-        outFileName = file;
+        fileName = vm["read"].as<string>();
+        outFileName = fileName;
     }
     else if(vm.count("write")) {
         request = WRQ;
-        file = vm["write"].as<string>();
+        fileName = vm["write"].as<string>();
     }
     else {
         cout << desc << "\n";
@@ -143,7 +218,6 @@ int main(int argc, char** argv) {
         requested_windowsize = vm["windowsize"].as<unsigned short>();
     }
 
-    int sock_fd, s;
 
     memset(&hints, 0, sizeof(struct addrinfo));
     hints.ai_family = AF_UNSPEC;   
@@ -184,7 +258,7 @@ int main(int argc, char** argv) {
     name.sin_port = htons(69);
     sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
     struct timeval timeout;
-    timeout.tv_sec = 1;
+    timeout.tv_sec = 2;
     timeout.tv_usec = 0;
     setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
 
@@ -193,10 +267,24 @@ int main(int argc, char** argv) {
 
 
     char msg[BUFFER_SIZE];
-    char buf[BUFFER_SIZE];
     memmove(msg, &request, 2);
-    ofstream outFile(outFileName.c_str());
-    int pos = write_to_buf(msg, 2, file);
+
+    if(request == RRQ){
+        file.open(outFileName, ios::out | ios::binary);
+    } else {
+        int res = access(fileName.c_str(), R_OK);
+        if(res < 0) {
+            cerr << "ACCESS ERROR";
+            exit(EXIT_FAILURE);
+        }
+        file.open(fileName, ios::in | ios::binary);
+    }
+    if(!file.good()) {
+        cerr << "OPEN ERROR\n";
+        exit(EXIT_FAILURE);
+    }
+
+    int pos = write_to_buf(msg, 2, fileName);
     pos = write_to_buf(msg, pos, mode);
     if(requested_blocksize != DEFAULT_BSIZE) {
         pos = write_to_buf(msg, pos, "blksize");
@@ -209,17 +297,20 @@ int main(int argc, char** argv) {
 
     sendto(sock_fd, msg, pos, 0, (sockaddr*)&name, ssize);
     name.sin_port = 0;
-    cout << "msg sent\n";
-    int block = 0;
-    unsigned short last_block = 0;
-    unsigned long long counter = 0;
-    unsigned short timeouts = 0;
-    unsigned short last_ACK = 0;
+    cerr << "Init message sent\n";
     while(true){
-        counter++;
-	    int k = recvfrom(sock_fd, buf, BUFFER_SIZE, 0, (sockaddr*)&name, &ssize);
+	    k = recvfrom(sock_fd, buf, BUFFER_SIZE, 0, (sockaddr*)&name, &ssize);
         if(k <= 0) {
-            sendACK(sock_fd, last_block);
+            if(request == RRQ) {
+                sendACK(last_block);
+                block = 0;
+            }
+            else {
+                position = last_position;
+                file.clear();
+                file.seekg(position, ios_base::beg);
+                sendData();
+            }
             if(timeouts == MAX_TIMEOUTS) {
                 cerr << "connection lost\n";
                 close(sock_fd);
@@ -231,7 +322,7 @@ int main(int argc, char** argv) {
         timeouts = 0;
 	    if(*((unsigned short*)buf) == ERROR) {
 		    cerr << "error ";
-		    unlink(file.c_str());
+		    if(request == RRQ) unlink(outFileName.c_str());
 		    for(int i = 4; i < k; i++){
 			    cerr << buf[i];
 		    }
@@ -240,30 +331,20 @@ int main(int argc, char** argv) {
         else if(*((unsigned short*)buf) == OACK) {
             block = 0;
             getOptions(blocksize, windowsize, buf, k);
-            sendACK(sock_fd, 0);
+            if(request == RRQ) sendACK(0);
+            else sendData();
             continue;
         }
-        block++;
-        unsigned short blocknum = *((unsigned short*)(buf + 2));
-        if(blocknum != (unsigned short)(last_block + 1)) {
-            if(last_ACK != last_block) {
-                sendACK(sock_fd, last_block);
-                block = 0;
-                last_ACK = last_block;
-            }
-            continue;
-        }
-	    for(int i = 4; i < k; i++){
-		    outFile << buf[i];
-	    }
-        last_block = blocknum;
-        if(block == windowsize || k < 4 + blocksize) {
-            sendACK(sock_fd, blocknum);
-            block = 0;
+        if(request == RRQ) read_data();
+        else {
+            unsigned short blocknum = *((unsigned short*)(buf + 2));
+            cerr << "RECEIVED ACK" << blocknum << "\n";
+            if(!is_good_ack(blocknum)) continue;
+            correct_position(blocknum);
             last_ACK = blocknum;
+            if(endd && last_ACK == last_block)exit(EXIT_SUCCESS);
+            sendData();
         }
-	    if(k < 4 + blocksize)
-		    break;
     }
 
     close(sock_fd);

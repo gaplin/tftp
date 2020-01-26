@@ -63,7 +63,7 @@ class Client {
     int fd, length = 0;
     unsigned long long position = 0, last_position = 0;
     unsigned short blockSize = DEFAULT_BSIZE, windowSize = DEFAULT_WSIZE, type, last_ACK = 0, last_block = 0,
-                    timeouts = 0;
+                    timeouts = 0, curr_block = 0;
     struct sockaddr_in address;
     socklen_t ssize = sizeof(struct sockaddr_in);
     char buf[BUFFER_SIZE];
@@ -86,6 +86,7 @@ class Client {
         swap(first.last_ACK, second.last_ACK);
         swap(first.last_block, second.last_block);
         swap(first.timeouts, second.timeouts);
+        swap(first.curr_block, second.curr_block);
         swap(first.address, second.address);
         swap(first.ssize, second.ssize);
         swap(first.buf, second.buf);
@@ -110,9 +111,15 @@ class Client {
     void update_timeout() {
         int timeout = (RTTm == -1) ? DEFAULT_TIMEOUT : (int)ceil(RTTs) + max(G, (int)ceil(4 * RTTd));
         if(timeout < MIN_TIMEOUT) timeout = MIN_TIMEOUT;
-        cout << RTTm << " " << RTTs << " " << RTTd << "\n";
-        cerr << "TIMEOUT = " << timeout << "\n";
         t_end = Clock::now() + Ms(timeout);
+    }
+
+    void sendACK(const int& blocknum) {
+        char buf[4];
+        memmove(buf, &ACK, 2);
+        memmove(buf + 2, &blocknum, 2);
+        cerr << "SENDING ACK " << blocknum << "\n";
+        Send(buf, 4);
     }
 
     public:
@@ -129,7 +136,12 @@ class Client {
         if(type == RRQ){
             file.open(fileName, ios::in | ios::binary);
         } else {
-            file.open(fileName, ios::app | ios::binary);
+            int res = access(fileName.c_str(), R_OK);
+            if(res < 0) {
+                if(errno == ENOENT) file.open(fileName, ios::out | ios::binary);
+                return;
+            }
+            SendError(6, "File already exists");
         }
     }
 
@@ -146,6 +158,7 @@ class Client {
         last_ACK = other.last_ACK;
         last_block = other.last_block;
         timeouts = other.timeouts;
+        curr_block = other.curr_block;
         ssize = other.ssize;
         fileName = other.fileName;
         end = other.end;
@@ -159,7 +172,12 @@ class Client {
         if(type == RRQ){
             file.open(fileName, ios::in | ios::binary);
         } else {
-            file.open(fileName, ios::app | ios::binary);
+            int res = access(fileName.c_str(), R_OK);
+            if(res < 0) {
+                if(errno == ENOENT) file.open(fileName, ios::out | ios::binary);
+                return;
+            }
+            SendError(6, "File already exists");
         }
     }
 
@@ -168,6 +186,7 @@ class Client {
     }
     ~Client() {
         file.close();
+        if(type == WRQ && !end) unlink(fileName.c_str());
     }
 
     Client& operator=(Client other) {
@@ -185,7 +204,8 @@ class Client {
         this->length = length;
         memmove(this->buf, buf, length);
         if(length > 0) {
-            calc_timeout();
+            if(type == RRQ) calc_timeout();
+            else update_timeout();
             timeouts = 0;
         }
         return length;
@@ -201,23 +221,18 @@ class Client {
                 if(!GetOptions() && (*this)) Respond_RRQ();
                 break;
             case WRQ:
-                if(!GetOptions() && (*this)) Respond_WRQ();
+                if(!GetOptions() && (*this)) sendACK(0);
                 break;
             case ACK: {
                 unsigned short blocknum = *((unsigned short*)(buf + 2));
                 if(!is_good_ack(blocknum)) return false;
                 correct_position(blocknum);
                 last_ACK = blocknum;
-                if((*this)) {
-                    switch (type) {
-                        case RRQ:
-                            Respond_RRQ();
-                            break;
-                    }
-                }
+                if((*this)) Respond_RRQ();
                 break;
             }
             case DATA: {
+                position = 1;
                 Respond_WRQ();
                 break;
             }
@@ -234,7 +249,7 @@ class Client {
         for(int i = 0; i < windowSize; i++) {
             memmove(buf, &DATA, 2);
             unsigned short blockNumber = position / blockSize + 1;
-            cerr << "SENDING " << blockNumber << "\n";
+            cerr << "SENDING DATA " << blockNumber << "\n";
             memmove(buf + 2, &blockNumber, 2);
             file.read(buf + 4, blockSize);
             int size = file.gcount();
@@ -249,12 +264,38 @@ class Client {
     }
 
     void Respond_WRQ() {
-
+        curr_block++;
+        unsigned short blocknum = *((unsigned short*)(buf + 2));
+        cerr << "RECEIVED DATA " << blocknum << "\n";
+        if(blocknum != (unsigned short)(last_block + 1)) {
+            if(last_ACK != last_block) {
+                sendACK(last_block);
+                curr_block = 0;
+                last_ACK = last_block;
+            }
+            return;
+        }
+        if(blocknum == (unsigned short)(last_ACK + 1)) {
+            calc_timeout();
+        }
+        for(int i = 4; i < length; i++){
+		    file << buf[i];
+	    }
+        last_block = blocknum;
+        if(curr_block == windowSize || length < 4 + blockSize) {
+            sendACK(blocknum);
+            curr_block = 0;
+            last_ACK = blocknum;
+        }
+        if(length < 4 + blockSize) {
+            end = true;
+        }
     }
 
     void Retransmit() {
         end = false;
         timeouts++;
+        cerr << "RETRANSMISSION\n";
         if(position == 0) {
             update_timeout();
             return;
@@ -264,8 +305,13 @@ class Client {
                 position = last_position;
                 file.clear();
                 file.seekg(position, ios_base::beg);
-                cerr << "RETRANSMISSION\n";
                 Respond_RRQ();
+                break;
+            case WRQ:
+                sendACK(last_block);
+                //update_timeout();
+                curr_block = 0;
+                break;
         }
     }
 
@@ -295,6 +341,7 @@ class Client {
         memmove(buf + 2, &errcode, 2);
         int pos = write_to_buf(buf, 4, errmsg);
         timeouts = MAX_TIMEOUTS;
+        end = true;
         return Send(buf, pos);
     }
 
@@ -376,7 +423,8 @@ class Client {
     }
 
     operator bool() const {
-        return timeouts < MAX_TIMEOUTS && !(end && last_ACK == last_block);
+        if(type == RRQ) return timeouts < MAX_TIMEOUTS && !(end && last_ACK == last_block);
+        return timeouts < MAX_TIMEOUTS && !(end);
     }
 };
 
@@ -445,6 +493,7 @@ int main(int argc, char** argv) {
             timeout = max(0, timeout);
         }
         if(timeout > DEFAULT_TIMEOUT) timeout = -1;
+        cerr << "Setting epoll_wait timeout " << timeout << "\n";
         nfds = epoll_wait(epollfd, events, MAX_EVENTS, timeout);
         if(nfds == -1) {
             perror("epoll wait");
@@ -484,7 +533,7 @@ int main(int argc, char** argv) {
                         continue;
                     }
 
-                    ev.events = EPOLLIN | EPOLLET;
+                    ev.events = EPOLLIN;// | EPOLLET;
                     ev.data.fd = conn_sock;
                     if(epoll_ctl(epollfd, EPOLL_CTL_ADD, conn_sock, &ev) < 0){
                         perror("epoll_ctl: conn_sock");
@@ -498,7 +547,12 @@ int main(int argc, char** argv) {
                         connection[cl].Recv(buf, data);
                     }
                 }
-                connection[cl].Respond();
+                if(connection[cl]) connection[cl].Respond();
+                else {
+                    cerr << "connection closed\n";
+                    if(!onePort) close(connection[cl].GetFd());
+                    connection.erase(cl);
+                }
             } else {
                 int fd = events[n].data.fd;
                 int length = recvfrom(fd, buf, BUFFER_SIZE, MSG_DONTWAIT, (sockaddr*)&connected, &ssize);
@@ -507,7 +561,7 @@ int main(int argc, char** argv) {
                 connection[cl].Respond();
                 if(!connection[cl]){
                     cerr << "connection closed\n";
-                    if(!onePort) close(fd);
+                    close(fd);
                     connection.erase(cl);
                 }
             }
