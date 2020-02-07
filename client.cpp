@@ -1,26 +1,7 @@
-// vim:ts=4:sts=4:sw=4:expandtab
-
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <unistd.h>
-#include <sys/types.h>
-#include <arpa/inet.h>
 #include <netdb.h>
-#include <poll.h>
 #include <boost/program_options.hpp>
 #include <boost/lexical_cast.hpp>
-
-#include <gsl/gsl_errno.h>
-#include <gsl/gsl_fft_complex.h>
-
-#include <complex>
 #include <iostream>
-#include <fstream>
-#include <vector>
-#include <thread>
-#include <ctime>
 #include <fstream>
 
 using namespace std;
@@ -31,13 +12,15 @@ namespace po = boost::program_options;
 #define DEFAULT_WSIZE 1U
 #define DEFAULT_BSIZE 512U
 #define MAX_TIMEOUTS 3
+#define DEFAULT_PORT "69"
+#define DEFAULT_IP "azure.prajer.ninja"
 
-const unsigned short RRQ = 1;
-const unsigned short WRQ = 2;
-const unsigned short DATA = 3;
-const unsigned short ACK = 4;
-const unsigned short ERROR = 5;
-const unsigned short OACK = 6;
+const unsigned short RRQ = (1 << 8);
+const unsigned short WRQ = (2 << 8);
+const unsigned short DATA = (3 << 8);
+const unsigned short ACK = (4 << 8);
+const unsigned short ERROR = (5 << 8);
+const unsigned short OACK = (6 << 8);
 const unsigned short MAX_BLOCK_SIZE = 65464;
 const unsigned short MIN_BLOCK_SIZE = 8;
 const unsigned short MAX_WINDOW_SIZE = 65535;
@@ -115,11 +98,13 @@ void sendACK(const int& blocknum) {
     char buf[4];
     memmove(buf, &ACK, 2);
     memmove(buf + 2, &blocknum, 2);
+    swap(buf[2], buf[3]);
     sendto(sock_fd, buf, 4, 0, (sockaddr*)&name, ssize);
 }
 
 void read_data() {
     block++;
+    swap(buf[2], buf[3]);
     unsigned short blocknum = *((unsigned short*)(buf + 2));
     if(blocknum != (unsigned short)(last_block + 1)) {
         if(last_ACK != last_block) {
@@ -149,6 +134,7 @@ void sendData() {
         unsigned short blockNumber = position / blocksize + 1;
         cerr << "SENDING DATA " << blockNumber << "\n";
         memmove(buf + 2, &blockNumber, 2);
+        swap(buf[2], buf[3]);
         file.read(buf + 4, blocksize);
         int size = file.gcount();
         position += blocksize;
@@ -169,6 +155,7 @@ int main(int argc, char** argv) {
     desc.add_options()
     ("help", "Print help message")
     ("host,h", po::value<string>(), "Host")
+    ("port,p", po::value<string>(), "Port")
     ("write,w", po::value<string>(), "Write")
     ("read,r", po::value<string>(), "Read")
     ("blocksize", po::value<unsigned short>(), "Blocksize")
@@ -184,8 +171,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    string port = "69";
-    string ip = "azure.prajer.ninja";
+    string port = DEFAULT_PORT;
+    string ip = DEFAULT_IP;
     string fileName, outFileName;
     unsigned short request = RRQ;
     unsigned short requested_windowsize = DEFAULT_WSIZE;
@@ -194,6 +181,9 @@ int main(int argc, char** argv) {
 
     if(vm.count("host")) {
         ip = vm["host"].as<string>();
+    }
+    if(vm.count("port")) {
+        port = vm["port"].as<string>();
     }
     if(vm.count("read")) {
         request = RRQ;
@@ -255,7 +245,7 @@ int main(int argc, char** argv) {
     close(sock_fd);
 
 
-    name.sin_port = htons(69);
+    name.sin_port = htons(boost::lexical_cast<int>(port));
     sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
     struct timeval timeout;
     timeout.tv_sec = 2;
@@ -337,8 +327,9 @@ int main(int argc, char** argv) {
         }
         if(request == RRQ) read_data();
         else {
+            swap(buf[2], buf[3]);
             unsigned short blocknum = *((unsigned short*)(buf + 2));
-            cerr << "RECEIVED ACK" << blocknum << "\n";
+            cerr << "RECEIVED ACK " << blocknum << "\n";
             if(!is_good_ack(blocknum)) continue;
             correct_position(blocknum);
             last_ACK = blocknum;

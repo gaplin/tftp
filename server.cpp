@@ -1,33 +1,11 @@
-// vim:ts=4:sts=4:sw=4:expandtab
-
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <unistd.h>
 #include <sys/epoll.h>
-#include <sys/types.h>
-#include <arpa/inet.h>
 #include <netdb.h>
-#include <poll.h>
-
-#include <gsl/gsl_errno.h>
-#include <gsl/gsl_fft_complex.h>
-
-#include <complex>
-#include <iostream>
-#include <fstream>
-#include <vector>
-#include <thread>
-#include <ctime>
-#include <fstream>
-#include <string.h>
-#include <cstdlib>
-#include <map>
-#include <fstream>
 #include <chrono>
 #include <boost/lexical_cast.hpp>
 #include <boost/program_options.hpp>
+#include <iostream>
+#include <fstream>
+#include <map>
 
 #define MIN_TIMEOUT 1000
 #define MAX_EVENTS 1000U
@@ -36,14 +14,15 @@
 #define DEFAULT_BSIZE 512U
 #define DEFAULT_TIMEOUT 2000
 #define BUFFER_SIZE 10000U
+#define DEFAULT_PORT 69
 #define G 100
 
-const unsigned short RRQ = 1;
-const unsigned short WRQ = 2;
-const unsigned short DATA = 3;
-const unsigned short ACK = 4;
-const unsigned short ERROR = 5;
-const unsigned short OACK = 6;
+const unsigned short RRQ = (1 << 8);
+const unsigned short WRQ = (2 << 8);
+const unsigned short DATA = (3 << 8);
+const unsigned short ACK = (4 << 8);
+const unsigned short ERROR = (5 << 8);
+const unsigned short OACK = (6 << 8);
 const unsigned short MAX_BLOCK_SIZE = 65464;
 const unsigned short MIN_BLOCK_SIZE = 8;
 const unsigned short MAX_WINDOW_SIZE = 65535;
@@ -118,6 +97,7 @@ class Client {
         char buf[4];
         memmove(buf, &ACK, 2);
         memmove(buf + 2, &blocknum, 2);
+        swap(buf[2], buf[3]);
         cerr << "SENDING ACK " << blocknum << "\n";
         Send(buf, 4);
     }
@@ -224,6 +204,7 @@ class Client {
                 if(!GetOptions() && (*this)) sendACK(0);
                 break;
             case ACK: {
+                swap(buf[2], buf[3]);
                 unsigned short blocknum = *((unsigned short*)(buf + 2));
                 if(!is_good_ack(blocknum)) return false;
                 correct_position(blocknum);
@@ -251,6 +232,7 @@ class Client {
             unsigned short blockNumber = position / blockSize + 1;
             cerr << "SENDING DATA " << blockNumber << "\n";
             memmove(buf + 2, &blockNumber, 2);
+            swap(buf[2], buf[3]);
             file.read(buf + 4, blockSize);
             int size = file.gcount();
             position += blockSize;
@@ -265,6 +247,7 @@ class Client {
 
     void Respond_WRQ() {
         curr_block++;
+        swap(buf[2], buf[3]);
         unsigned short blocknum = *((unsigned short*)(buf + 2));
         cerr << "RECEIVED DATA " << blocknum << "\n";
         if(blocknum != (unsigned short)(last_block + 1)) {
@@ -309,7 +292,6 @@ class Client {
                 break;
             case WRQ:
                 sendACK(last_block);
-                //update_timeout();
                 curr_block = 0;
                 break;
         }
@@ -339,6 +321,7 @@ class Client {
         char buf[BUFFER_SIZE];
         memmove(buf, &ERROR, 2);
         memmove(buf + 2, &errcode, 2);
+        swap(buf[2], buf[3]);
         int pos = write_to_buf(buf, 4, errmsg);
         timeouts = MAX_TIMEOUTS;
         end = true;
@@ -440,16 +423,21 @@ int main(int argc, char** argv) {
     po::options_description desc("Options");
     desc.add_options()
     ("help", "Print help message")
-    ("oneport,p", "All queries on port 69");
+    ("port,p", po::value<unsigned short>(), "Port")
+    ("oneport,o", "All queries on one port");
 
     po::variables_map vm;
     po::store(po::parse_command_line(argc, argv, desc), vm);
     po::notify(vm);
 
+    unsigned short port = DEFAULT_PORT;
 
     if(vm.count("help")) {
         cout << desc << "\n";
         return 1;
+    }
+    if(vm.count("port")) {
+        port = vm["port"].as<unsigned short>();
     }
     if(vm.count("oneport")) {
         onePort = true;
@@ -460,7 +448,7 @@ int main(int argc, char** argv) {
 
     memset(&name, 0, sizeof(name));
     name.sin_family = AF_INET;
-    name.sin_port = htons(69);
+    name.sin_port = htons(port);
     name.sin_addr.s_addr = 0;
 
     if(bind(listen_sock, (sockaddr*)&name, sizeof(name)) < 0) {
@@ -533,7 +521,7 @@ int main(int argc, char** argv) {
                         continue;
                     }
 
-                    ev.events = EPOLLIN;// | EPOLLET;
+                    ev.events = EPOLLIN;
                     ev.data.fd = conn_sock;
                     if(epoll_ctl(epollfd, EPOLL_CTL_ADD, conn_sock, &ev) < 0){
                         perror("epoll_ctl: conn_sock");
