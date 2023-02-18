@@ -8,12 +8,12 @@ using namespace std;
 namespace po = boost::program_options;
 
 
-#define BUFFER_SIZE 10000U
+#define BUFFER_SIZE 100000U
 #define DEFAULT_WSIZE 1U
 #define DEFAULT_BSIZE 512U
 #define MAX_TIMEOUTS 3
 #define DEFAULT_PORT "69"
-#define DEFAULT_IP "ip"
+#define DEFAULT_IP "localhost"
 
 const unsigned short RRQ = (1 << 8);
 const unsigned short WRQ = (2 << 8);

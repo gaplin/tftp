@@ -13,7 +13,7 @@
 #define DEFAULT_WSIZE 1U
 #define DEFAULT_BSIZE 512U
 #define DEFAULT_TIMEOUT 2000
-#define BUFFER_SIZE 10000U
+#define BUFFER_SIZE 100000U
 #define DEFAULT_PORT 69
 #define G 100
 
@@ -37,7 +37,7 @@ typedef pair<unsigned long, unsigned short> P;
 bool onePort = false;
 
 
-class Client {
+class Server {
     private:
     int fd, length = 0;
     unsigned long long position = 0, last_position = 0;
@@ -53,7 +53,7 @@ class Client {
     Clock::time_point start = Clock::now();
     double RTTm = -1, RTTs = -1, RTTd = -1, t = 0.125, k = 0.25;
 
-    friend void swap(Client& first, Client& second){
+    friend void swap(Server& first, Server& second){
         using std::swap;
         swap(first.fd, second.fd);
         swap(first.length, second.length);
@@ -104,9 +104,9 @@ class Client {
 
     public:
 
-    Client() {}
+    Server() {}
 
-    Client(int fd, struct sockaddr_in& addr, char buf[], int length){
+    Server(int fd, struct sockaddr_in& addr, char buf[], int length){
         memmove(this->buf, buf, length);
         memmove(&address, &addr, sizeof(addr));
         this->length = length;
@@ -125,7 +125,7 @@ class Client {
         }
     }
 
-    Client(const Client& other) {
+    Server(const Server& other) {
         memmove(buf, other.buf, other.length);
         memmove(&address, &(other.address), sizeof(other.address));
         fd = other.fd;
@@ -161,15 +161,15 @@ class Client {
         }
     }
 
-    Client(Client && other){
+    Server(Server && other){
         swap(*this, other);
     }
-    ~Client() {
+    ~Server() {
         file.close();
         if(type == WRQ && !end) unlink(fileName.c_str());
     }
 
-    Client& operator=(Client other) {
+    Server& operator=(Server other) {
         swap(*this, other);
         return *this;
     }
@@ -411,7 +411,7 @@ class Client {
     }
 };
 
-map<P, Client> connection;
+map<P, Server> connection;
 struct epoll_event ev, events[MAX_EVENTS];
 struct sockaddr_in connected;
 socklen_t ssize = sizeof(connected);
@@ -527,10 +527,10 @@ int main(int argc, char** argv) {
                         perror("epoll_ctl: conn_sock");
                         close(conn_sock);
                     }
-                    connection[cl] = Client(conn_sock, connected, buf, data);
+                    connection[cl] = Server(conn_sock, connected, buf, data);
                 } else {
                     if(connection.count(cl) == 0) {
-                        connection[cl] = Client(listen_sock, connected, buf, data);
+                        connection[cl] = Server(listen_sock, connected, buf, data);
                     } else {
                         connection[cl].Recv(buf, data);
                     }
