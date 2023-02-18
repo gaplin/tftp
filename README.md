@@ -1,4 +1,5 @@
 # Tftp client and server
+Simple tftp client and server written in C++ with boost library.
 
 ## Requirements
   * boost library
