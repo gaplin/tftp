@@ -37,7 +37,7 @@ typedef pair<unsigned long, unsigned short> P;
 bool onePort = false;
 
 
-class Server {
+class Client {
     private:
     int fd, length = 0;
     unsigned long long position = 0, last_position = 0;
@@ -53,7 +53,7 @@ class Server {
     Clock::time_point start = Clock::now();
     double RTTm = -1, RTTs = -1, RTTd = -1, t = 0.125, k = 0.25;
 
-    friend void swap(Server& first, Server& second){
+    friend void swap(Client& first, Client& second){
         using std::swap;
         swap(first.fd, second.fd);
         swap(first.length, second.length);
@@ -104,9 +104,9 @@ class Server {
 
     public:
 
-    Server() {}
+    Client() {}
 
-    Server(int fd, struct sockaddr_in& addr, char buf[], int length){
+    Client(int fd, struct sockaddr_in& addr, char buf[], int length){
         memmove(this->buf, buf, length);
         memmove(&address, &addr, sizeof(addr));
         this->length = length;
@@ -125,7 +125,7 @@ class Server {
         }
     }
 
-    Server(const Server& other) {
+    Client(const Client& other) {
         memmove(buf, other.buf, other.length);
         memmove(&address, &(other.address), sizeof(other.address));
         fd = other.fd;
@@ -161,15 +161,15 @@ class Server {
         }
     }
 
-    Server(Server && other){
+    Client(Client && other){
         swap(*this, other);
     }
-    ~Server() {
+    ~Client() {
         file.close();
         if(type == WRQ && !end) unlink(fileName.c_str());
     }
 
-    Server& operator=(Server other) {
+    Client& operator=(Client other) {
         swap(*this, other);
         return *this;
     }
@@ -411,7 +411,7 @@ class Server {
     }
 };
 
-map<P, Server> connection;
+map<P, Client> connection;
 struct epoll_event ev, events[MAX_EVENTS];
 struct sockaddr_in connected;
 socklen_t ssize = sizeof(connected);
@@ -527,10 +527,10 @@ int main(int argc, char** argv) {
                         perror("epoll_ctl: conn_sock");
                         close(conn_sock);
                     }
-                    connection[cl] = Server(conn_sock, connected, buf, data);
+                    connection[cl] = Client(conn_sock, connected, buf, data);
                 } else {
                     if(connection.count(cl) == 0) {
-                        connection[cl] = Server(listen_sock, connected, buf, data);
+                        connection[cl] = Client(listen_sock, connected, buf, data);
                     } else {
                         connection[cl].Recv(buf, data);
                     }
